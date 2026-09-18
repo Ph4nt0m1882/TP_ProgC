@@ -1,0 +1,2 @@
+Nom : Paul | Prénom : Leblanc | Adresse : 2 rue Lenoir | Note 1 : 20.00 | Note 2 : 30.00
+Nom : élève | Prénom : perturbateur | Adresse : Kanisvaran : Kanagalingam : 3 rue ygrec | Note 1 : 18.00 | Note 2 : 25.00
