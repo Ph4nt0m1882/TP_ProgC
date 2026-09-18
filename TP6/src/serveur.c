@@ -16,24 +16,25 @@
 #include <unistd.h>
 
 #include "serveur.h"
-int socketfd;
 
-int visualize_plot()
+int socketfd = -1;
+
+int visualize_plot(void)
 {
   const char *browser = "firefox";
 
   char command[256];
-  snprintf(command, sizeof(command), "%s %s", browser, svg_file_path);
+  snprintf(command, sizeof(command), "%s %s 2>/dev/null", browser, SVG_FILE_PATH);
 
   int result = system(command);
 
   if (result == 0)
   {
-    printf("SVG file opened in %s.\n", browser);
+    printf("Fichier SVG ouvert dans %s.\n", browser);
   }
   else
   {
-    printf("Failed to open the SVG file.\n");
+    printf("Diagramme SVG généré dans \"%s\".\n", SVG_FILE_PATH);
   }
 
   return 0;
@@ -44,21 +45,21 @@ double degreesToRadians(double degrees)
   return degrees * M_PI / 180.0;
 }
 
-int plot(char *data)
+/**
+ * Exercice 6.1 & 6.2 :
+ * Génère un graphique SVG camembert avec un nombre paramétrable de couleurs (<= 30).
+ */
+int plot_colors(char colors[][16], int num_colors)
 {
-  int i;
-  char *saveptr = NULL;
-  char *str = data;
-  char *token = strtok_r(str, ",", &saveptr);
-  const int num_colors = 10;
+  if (num_colors <= 0)
+  {
+    return 1;
+  }
 
-  double angles[num_colors];
-  memset(angles, 0, sizeof(angles));
-
-  FILE *svg_file = fopen(svg_file_path, "w");
+  FILE *svg_file = fopen(SVG_FILE_PATH, "w");
   if (svg_file == NULL)
   {
-    perror("Error opening file");
+    perror("Erreur lors de l'ouverture du fichier SVG");
     return 1;
   }
 
@@ -69,22 +70,12 @@ int plot(char *data)
   double center_x = 200.0;
   double center_y = 200.0;
   double radius = 150.0;
-
   double start_angle = -90.0;
+  double slice_angle = 360.0 / (double)num_colors;
 
-  str = NULL;
-  i = 0;
-  while (1)
+  for (int i = 0; i < num_colors; i++)
   {
-    token = strtok_r(str, ",", &saveptr);
-    if (token == NULL)
-    {
-      break;
-    }
-    str = NULL;
-    angles[i] = 360.0 / num_colors;
-
-    double end_angle = start_angle + angles[i];
+    double end_angle = start_angle + slice_angle;
 
     double start_angle_rad = degreesToRadians(start_angle);
     double end_angle_rad = degreesToRadians(end_angle);
@@ -95,139 +86,257 @@ int plot(char *data)
     double y2 = center_y + radius * sin(end_angle_rad);
 
     fprintf(svg_file, "  <path d=\"M%.2f,%.2f A%.2f,%.2f 0 0,1 %.2f,%.2f L%.2f,%.2f Z\" fill=\"%s\" />\n",
-            x1, y1, radius, radius, x2, y2, center_x, center_y, token);
+            x1, y1, radius, radius, x2, y2, center_x, center_y, colors[i]);
 
     start_angle = end_angle;
-    i++;
   }
 
   fprintf(svg_file, "</svg>\n");
-
   fclose(svg_file);
 
   visualize_plot();
   return 0;
 }
 
-/* renvoyer un message (*data) au client (client_socket_fd)
+/**
+ * Traite les données de couleurs au format texte ou CSV.
  */
+int plot(char *data)
+{
+  char colors[32][16];
+  int num_colors = 0;
+
+  char *saveptr = NULL;
+  char *token = strtok_r(data, ",", &saveptr);
+
+  /* Le premier jeton peut contenir le nombre de couleurs (ex: "couleurs: 10" ou "10") */
+  if (token != NULL)
+  {
+    int n = 0;
+    if (sscanf(token, "%*[^0-9]%d", &n) == 1 && n > 0 && n <= 30)
+    {
+      /* Nombre de couleurs explicite */
+    }
+    else if (token[0] == '#')
+    {
+      strncpy(colors[num_colors++], token, 15);
+      colors[num_colors - 1][15] = '\0';
+    }
+
+    while ((token = strtok_r(NULL, ",", &saveptr)) != NULL && num_colors < 30)
+    {
+      if (token[0] == '#')
+      {
+        strncpy(colors[num_colors++], token, 15);
+        colors[num_colors - 1][15] = '\0';
+      }
+    }
+  }
+
+  if (num_colors == 0)
+  {
+    num_colors = 1;
+    strcpy(colors[0], "#ff0000");
+  }
+
+  return plot_colors(colors, num_colors);
+}
+
 int renvoie_message(int client_socket_fd, char *data)
 {
   int data_size = write(client_socket_fd, (void *)data, strlen(data));
-
   if (data_size < 0)
   {
     perror("erreur ecriture");
-    return (EXIT_FAILURE);
+    return EXIT_FAILURE;
   }
-  return (EXIT_SUCCESS);
+  return EXIT_SUCCESS;
 }
 
-/* accepter la nouvelle connection d'un client et lire les données
- * envoyées par le client. En suite, le serveur envoie un message
- * en retour
+/**
+ * Exercice 6.3 :
+ * Traitement des messages au format JSON :
+ * - {"code": "message", "valeurs": ["..."]}
+ * - {"code": "calcule", "valeurs": ["+", "23", "45"]}
+ * - {"code": "couleurs", "valeurs": ["#ff0000", ...]}
  */
-int recois_envoie_message(int client_socket_fd, char data[1024])
+static int traiter_message_json(int client_socket_fd, const char *json_str)
 {
-  /*
-   * extraire le code des données envoyées par le client.
-   * Les données envoyées par le client peuvent commencer par le mot "message :" ou un autre mot.
-   */
-  printf("Message recu: %s\n", data);
-  char code[10];
-  sscanf(data, "%s", code);
+  char reponse[2048];
 
-  // Si le message commence par le mot: 'message:'
-  if (strcmp(code, "message:") == 0)
+  if (strstr(json_str, "\"code\": \"calcule\"") != NULL ||
+      strstr(json_str, "\"code\":\"calcule\"") != NULL)
   {
-    renvoie_message(client_socket_fd, data);
+    /* Extraction opérateur et nombres */
+    char op = '+';
+    float n1 = 0.0f, n2 = 0.0f;
+    const char *p_vals = strstr(json_str, "\"valeurs\"");
+    if (p_vals)
+    {
+      /* Recherche de l'opérateur et des valeurs dans ["<op>", "<n1>", "<n2>"] */
+      const char *p_bracket = strchr(p_vals, '[');
+      if (p_bracket)
+      {
+        char temp[256];
+        strncpy(temp, p_bracket, sizeof(temp) - 1);
+        temp[sizeof(temp) - 1] = '\0';
+
+        char op_str[16] = "+", s1[32] = "0", s2[32] = "0";
+        if (sscanf(temp, "[\"%15[^\"]\", \"%31[^\"]\", \"%31[^\"]\"]", op_str, s1, s2) >= 3)
+        {
+          op = op_str[0];
+          n1 = (float)atof(s1);
+          n2 = (float)atof(s2);
+        }
+      }
+    }
+
+    float res = 0.0f;
+    switch (op)
+    {
+      case '+': res = n1 + n2; break;
+      case '-': res = n1 - n2; break;
+      case '*': res = n1 * n2; break;
+      case '/': res = (n2 != 0.0f) ? (n1 / n2) : 0.0f; break;
+      default: res = 0.0f; break;
+    }
+
+    printf("Calcul JSON : %g %c %g = %g\n", n1, op, n2, res);
+    snprintf(reponse, sizeof(reponse),
+             "{\n  \"code\": \"reponse\",\n  \"statut\": \"succes\",\n  \"resultat\": %g\n}\n",
+             res);
+    return renvoie_message(client_socket_fd, reponse);
+  }
+  else if (strstr(json_str, "\"code\": \"couleurs\"") != NULL ||
+           strstr(json_str, "\"code\":\"couleurs\"") != NULL)
+  {
+    /* Extraction des codes couleurs #... */
+    char colors[32][16];
+    int count = 0;
+    const char *p = json_str;
+
+    while ((p = strchr(p, '#')) != NULL && count < 30)
+    {
+      int len = 0;
+      while (p[len] != '\"' && p[len] != ',' && p[len] != ']' && p[len] != '\0' && len < 15)
+      {
+        colors[count][len] = p[len];
+        len++;
+      }
+      colors[count][len] = '\0';
+      count++;
+      p += len;
+    }
+
+    printf("Réception de %d couleurs en format JSON.\n", count);
+    if (count > 0)
+    {
+      plot_colors(colors, count);
+    }
+
+    snprintf(reponse, sizeof(reponse),
+             "{\n  \"code\": \"reponse\",\n  \"statut\": \"succes\",\n  \"nb_couleurs\": %d\n}\n",
+             count);
+    return renvoie_message(client_socket_fd, reponse);
   }
   else
   {
-    plot(data);
+    /* Message JSON générique : renvoi écho en JSON */
+    snprintf(reponse, sizeof(reponse),
+             "{\n  \"code\": \"reponse\",\n  \"statut\": \"succes\",\n  \"message\": \"reçu\"\n}\n");
+    return renvoie_message(client_socket_fd, reponse);
+  }
+}
+
+int recois_envoie_message(int client_socket_fd, char data[2048])
+{
+  printf("Message reçu: %s\n", data);
+
+  /* Si le message est au format JSON */
+  if (data[0] == '{')
+  {
+    return traiter_message_json(client_socket_fd, data);
   }
 
-  return (EXIT_SUCCESS);
+  /* Format simple classique */
+  char code[16];
+  if (sscanf(data, "%15s", code) == 1)
+  {
+    if (strcmp(code, "message:") == 0)
+    {
+      return renvoie_message(client_socket_fd, data);
+    }
+  }
+
+  return plot(data);
 }
 
-// Fonction de gestion du signal Ctrl+C
 void gestionnaire_ctrl_c(int signal)
 {
+  (void)signal; /* Évite l'avertissement unused-parameter */
   printf("\nSignal Ctrl+C capturé. Sortie du programme.\n");
-  // fermer le socket
-  close(socketfd);
-  exit(0); // Quitter proprement le programme.
+  if (socketfd != -1)
+  {
+    close(socketfd);
+  }
+  exit(0);
 }
 
-int main()
+int main(void)
 {
   int bind_status;
-
   struct sockaddr_in server_addr;
 
-  /*
-   * Creation d'une socket
-   */
   socketfd = socket(AF_INET, SOCK_STREAM, 0);
   if (socketfd < 0)
   {
-    perror("Unable to open a socket");
+    perror("Impossible d'ouvrir la socket");
     return -1;
   }
 
   int option = 1;
   setsockopt(socketfd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
 
-  // détails du serveur (adresse et port)
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
   server_addr.sin_port = htons(PORT);
   server_addr.sin_addr.s_addr = INADDR_ANY;
 
-  // Relier l'adresse à la socket
   bind_status = bind(socketfd, (struct sockaddr *)&server_addr, sizeof(server_addr));
   if (bind_status < 0)
   {
     perror("bind");
-    return (EXIT_FAILURE);
+    return EXIT_FAILURE;
   }
 
-  // Enregistrez la fonction de gestion du signal Ctrl+C
   signal(SIGINT, gestionnaire_ctrl_c);
+  listen(socketfd, 10);
 
-  // Écouter les messages envoyés par le client en boucle infinie
+  printf("Serveur en attente de connexions (port %d)...\n", PORT);
+
   while (1)
   {
-    // Écouter les messages envoyés par le client
-    listen(socketfd, 10);
-
-    // Lire et répondre au client
     struct sockaddr_in client_addr;
-    char data[1024];
-
+    char data[2048];
     unsigned int client_addr_len = sizeof(client_addr);
 
-    // nouvelle connection de client
     int client_socket_fd = accept(socketfd, (struct sockaddr *)&client_addr, &client_addr_len);
     if (client_socket_fd < 0)
     {
       perror("accept");
-      return (EXIT_FAILURE);
+      continue;
     }
 
-    // la réinitialisation de l'ensemble des données
     memset(data, 0, sizeof(data));
+    int data_size = read(client_socket_fd, (void *)data, sizeof(data) - 1);
 
-    // lecture de données envoyées par un client
-    int data_size = read(client_socket_fd, (void *)data, sizeof(data));
-
-    if (data_size < 0)
+    if (data_size > 0)
     {
-      perror("erreur lecture");
-      return (EXIT_FAILURE);
+      data[data_size] = '\0';
+      recois_envoie_message(client_socket_fd, data);
     }
 
-    recois_envoie_message(client_socket_fd, data);
+    close(client_socket_fd);
   }
 
   return 0;

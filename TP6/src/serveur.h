@@ -10,13 +10,16 @@
 
 #define PORT 8089
 
-/* accepter la nouvelle connection d'un client et lire les données
- * envoyées par le client. En suite, le serveur envoie un message
- * en retour
- */
+#define SVG_FILE_PATH "pie_chart.svg"
 
-const char *svg_file_path = "pie_chart.svg";
+/* Renvoie un message au client */
+int renvoie_message(int client_socket_fd, char *data);
 
-int recois_envoie_message(int, char[1024]);
+/* Lit et traite les messages (format JSON ou simple) envoyés par le client */
+int recois_envoie_message(int client_socket_fd, char data[2048]);
+
+/* Génère le diagramme circulaire SVG à partir d'un ensemble de couleurs */
+int plot(char *data);
+int plot_colors(char colors[][16], int num_colors);
 
 #endif
